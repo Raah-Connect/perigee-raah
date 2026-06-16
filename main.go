@@ -105,13 +105,14 @@ func runServer() error {
 	http.HandleFunc("/v1/get/point", handlers.GetPoint())
 	http.HandleFunc("/v1/get/pending", handlers.GetPending())
 	http.HandleFunc("/v1/get/code", handlers.GetCode())
+	http.HandleFunc("/v1/get/keyfile", handlers.GetKeyfile())
 	http.HandleFunc("/v1/mod/breach", handlers.ModBreach())
 	http.HandleFunc("/v1/mod/escape", handlers.ModEscape())
 	http.HandleFunc("/v1/mod/cancel-escape", handlers.ModCancelEscape())
 	http.HandleFunc("/v1/mod/adopt", handlers.ModAdopt())
 
-	http.HandleFunc("/healthz", handlers.ReadinessProbe)
-	http.HandleFunc("/readyz", handlers.LivenessProbe)
+	http.HandleFunc("/healthz", handlers.LivenessProbe)
+	http.HandleFunc("/readyz", handlers.ReadinessProbe)
 
 	http.Handle("/", web)
 

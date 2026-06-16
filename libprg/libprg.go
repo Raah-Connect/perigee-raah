@@ -41,7 +41,6 @@ var (
 	ErrKeyMismatch     = errors.New("public key mismatch with PKI")
 	ErrKeyMaterial     = errors.New("invalid key material")
 	ErrRollerOperation = errors.New("roller operation failed")
-	ctx                = context.Background()
 )
 
 type EclipticSession struct {
@@ -50,113 +49,108 @@ type EclipticSession struct {
 	TransactOpts bind.TransactOpts
 }
 
-func GetContext() context.Context {
-	return ctx
-}
-
 /*
 Note: for passphrases and life values, just set default values if
 you don't have a specific reason to use them
 */
 
-func Escape(point, masterTicket, passphrase, sponsor string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func Escape(ctx context.Context, point, sponsor, masterTicket, passphrase string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, sponsor, roller.Client.Escape)
+		return l2Transaction(ctx, point, masterTicket, passphrase, sponsor, roller.Client.Escape)
 	} else {
-		return l1Escape(point, sponsor, privateKey)
+		return l1Escape(ctx, point, sponsor, privateKey)
 	}
 }
 
-func CancelEscape(point, masterTicket, passphrase, sponsor string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func CancelEscape(ctx context.Context, point, sponsor, masterTicket, passphrase string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, sponsor, roller.Client.CancelEscape)
+		return l2Transaction(ctx, point, masterTicket, passphrase, sponsor, roller.Client.CancelEscape)
 	} else {
-		return l1CancelEscape(point, privateKey)
+		return l1CancelEscape(ctx, point, privateKey)
 	}
 }
 
-func Adopt(point, masterTicket, passphrase, adoptee string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func Adopt(ctx context.Context, point, adoptee, masterTicket, passphrase string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, adoptee, roller.Client.Adopt)
+		return l2Transaction(ctx, point, masterTicket, passphrase, adoptee, roller.Client.Adopt)
 	} else {
-		return l1Adopt(adoptee, privateKey)
+		return l1Adopt(ctx, adoptee, privateKey)
 	}
 }
 
-func Breach(point, ticket, passphrase, seed string) (interface{}, error) {
+func Breach(ctx context.Context, point, ticket, passphrase, seed string) (interface{}, error) {
 	var wallet keygen.Wallet
 	var pointInfo *types.Point
 	var patp string
 	var err error
-	var cryptPubkey string
-	var authPubkey string
 	if seed == "" {
-		wallet, pointInfo, patp, err = getWalletAndPoint(point, ticket, passphrase, 0, false)
+		wallet, pointInfo, patp, err = getWalletAndPoint(ctx, point, ticket, passphrase, 0, false)
 		if err != nil {
 			return types.Transaction{}, err
 		}
-		cryptPubkey = wallet.Network.Keys.Crypt.Public
-		authPubkey = wallet.Network.Keys.Auth.Public
 	} else {
-		// if providing a seed, generate keys
-		pointRes, err := Point(point)
+		// if providing a seed, network keys are generated from it instead of a wallet
+		pointRes, err := Point(ctx, point)
 		if err != nil {
 			return types.Transaction{}, err
 		}
 		pointInfo = pointRes.Point
+		patp = pointRes.PatpName
 	}
 	if pointInfo.Dominion == "l2" {
-		privKey, derivedPubkey, _, networkKeys, _, err := ValidateKey(point, ticket, passphrase, seed, true)
-		cryptPubkey = networkKeys.Crypt.Public
-		authPubkey = networkKeys.Auth.Public
+		privKey, derivedPubkey, _, networkKeys, _, err := ValidateKey(ctx, point, ticket, passphrase, seed, true)
 		if err != nil {
 			return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 		}
 		keysTx, err := roller.Client.ConfigureKeys(ctx, patp,
-			"0x"+cryptPubkey,
-			"0x"+authPubkey,
+			"0x"+networkKeys.Crypt.Public,
+			"0x"+networkKeys.Auth.Public,
 			true, derivedPubkey, privKey)
 		if err != nil {
 			return types.Transaction{}, fmt.Errorf("%w: %v", ErrRollerOperation, err)
 		}
 		return *keysTx, nil
 	} else {
-		tx, err := setL1NetworkKeys(point, pointInfo, wallet, true)
+		if seed != "" {
+			return types.Transaction{}, fmt.Errorf("breach with a private key and seed is only supported for l2 points; %s is %s", patp, pointInfo.Dominion)
+		}
+		tx, err := setL1NetworkKeys(ctx, point, pointInfo, wallet, true)
 		if err != nil {
 			return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 		}
-		ethClient, err := ethclient.Dial(EthProvider)
+		ethClient, err := ethclient.DialContext(ctx, EthProvider)
 		if err != nil {
 			return types.Transaction{}, fmt.Errorf("failed to connect to Ethereum node: %v", err)
 		}
+		defer ethClient.Close()
 		receipt, err := waitForReceipt(ctx, ethClient, tx)
 		if err != nil {
-			return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
+			return types.Transaction{}, fmt.Errorf("waiting for keys receipt: %v", err)
 		}
 		return receipt, nil
 	}
 }
 
-func TransferOwnership(point, masterTicket, passphrase, newOwner string, reset bool) (interface{}, error) {
-	privateKey, derivedPubkey, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func TransferOwnership(ctx context.Context, point, masterTicket, passphrase, newOwner string, reset bool) (interface{}, error) {
+	privateKey, derivedPubkey, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
 		tx, err := roller.Client.TransferPoint(
-			context.Background(),
+			ctx,
 			point,
 			reset,
 			newOwner,
@@ -169,64 +163,64 @@ func TransferOwnership(point, masterTicket, passphrase, newOwner string, reset b
 		return *tx, nil
 	} else {
 		// Handle L1 logic
-		return l1TransferOwnership(common.HexToAddress(newOwner), privateKey)
+		return l1TransferOwnership(ctx, common.HexToAddress(newOwner), privateKey)
 	}
 }
 
-func SetManagementProxy(point, masterTicket, passphrase, proxy string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func SetManagementProxy(ctx context.Context, point, masterTicket, passphrase, proxy string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, proxy, roller.Client.SetManagementProxy)
+		return l2Transaction(ctx, point, masterTicket, passphrase, proxy, roller.Client.SetManagementProxy)
 	} else {
-		return l1SetManagementProxy(point, common.HexToAddress(proxy), privateKey)
+		return l1SetManagementProxy(ctx, point, common.HexToAddress(proxy), privateKey)
 	}
 }
 
-func SetTransferProxy(point, masterTicket, passphrase, proxy string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func SetTransferProxy(ctx context.Context, point, masterTicket, passphrase, proxy string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, proxy, roller.Client.SetTransferProxy)
+		return l2Transaction(ctx, point, masterTicket, passphrase, proxy, roller.Client.SetTransferProxy)
 	} else {
-		return l1SetTransferProxy(point, common.HexToAddress(proxy), privateKey)
+		return l1SetTransferProxy(ctx, point, common.HexToAddress(proxy), privateKey)
 	}
 }
 
-func SetSpawnProxy(point, masterTicket, passphrase, proxy string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+func SetSpawnProxy(ctx context.Context, point, masterTicket, passphrase, proxy string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return l2Transaction(point, masterTicket, passphrase, proxy, roller.Client.SetSpawnProxy)
+		return l2Transaction(ctx, point, masterTicket, passphrase, proxy, roller.Client.SetSpawnProxy)
 	} else {
-		return l1SetSpawnProxy(point, common.HexToAddress(proxy), privateKey)
+		return l1SetSpawnProxy(ctx, point, common.HexToAddress(proxy), privateKey)
 	}
 }
 
-func SetVotingProxy(galaxy, masterTicket, passphrase, voter string) (interface{}, error) {
-	privateKey, _, pointInfo, _, _, err := ValidateKey(galaxy, masterTicket, passphrase, "", false)
+func SetVotingProxy(ctx context.Context, galaxy, masterTicket, passphrase, voter string) (interface{}, error) {
+	privateKey, _, pointInfo, _, _, err := ValidateKey(ctx, galaxy, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
 	if pointInfo.Dominion == "l2" {
-		return types.Transaction{}, fmt.Errorf("how did you even submit this transaction")
+		return types.Transaction{}, fmt.Errorf("voting proxies only exist on l1")
 	} else {
-		return l1SetVotingProxy(galaxy, common.HexToAddress(voter), privateKey)
+		return l1SetVotingProxy(ctx, galaxy, common.HexToAddress(voter), privateKey)
 	}
 }
 
-func Pending(addr string) ([]types.PendingTx, error) {
+func Pending(ctx context.Context, addr string) ([]types.PendingTx, error) {
 	if addr == "" {
 		return roller.Client.GetAllPending(ctx)
 	}
 	if !strings.HasPrefix(addr, "0x") {
-		_, pInfo, err := validatePointAndGetInfo(addr)
+		_, pInfo, err := validatePointAndGetInfo(ctx, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -235,8 +229,8 @@ func Pending(addr string) ([]types.PendingTx, error) {
 	return roller.Client.GetPendingByAddress(ctx, addr)
 }
 
-func Point(point string) (types.PointResp, error) {
-	patp, pInfo, err := validatePointAndGetInfo(point)
+func Point(ctx context.Context, point string) (types.PointResp, error) {
+	patp, pInfo, err := validatePointAndGetInfo(ctx, point)
 	if err != nil {
 		return types.PointResp{}, err
 	}
@@ -256,16 +250,16 @@ func Point(point string) (types.PointResp, error) {
 	return resp, nil
 }
 
-func Wallet(point, masterTicket, passphrase string, life int) (keygen.Wallet, error) {
-	wallet, _, _, err := getWalletAndPoint(point, masterTicket, passphrase, life, false)
+func Wallet(ctx context.Context, point, masterTicket, passphrase string, life int) (keygen.Wallet, error) {
+	wallet, _, _, err := getWalletAndPoint(ctx, point, masterTicket, passphrase, life, false)
 	if err != nil {
 		return keygen.Wallet{}, err
 	}
 	return wallet, nil
 }
 
-func Keyfile(point, masterTicket, passphrase string, life int) (string, error) {
-	wallet, pInfo, patp, err := getWalletAndPoint(point, masterTicket, passphrase, life, true)
+func Keyfile(ctx context.Context, point, masterTicket, passphrase string, life int) (string, error) {
+	wallet, pInfo, patp, err := getWalletAndPoint(ctx, point, masterTicket, passphrase, life, true)
 	if err != nil {
 		return "", err
 	}
@@ -285,38 +279,63 @@ func Keyfile(point, masterTicket, passphrase string, life int) (string, error) {
 	return keyfile, nil
 }
 
-func setL1NetworkKeys(patp string, point *types.Point, wallet keygen.Wallet, breach bool) (*ethTypes.Transaction, error) {
+// newTransactor builds a keyed transactor for the client's chain with a gas
+// price set, bound to ctx.
+func newTransactor(ctx context.Context, client *ethclient.Client, privateKey *ecdsa.PrivateKey) (*bind.TransactOpts, error) {
+	chainID, err := client.NetworkID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network ID: %v", err)
+	}
+	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transactor: %v", err)
+	}
+	auth.Context = ctx
+	if err := getGas(ctx, client, auth, 5); err != nil {
+		return nil, err
+	}
+	return auth, nil
+}
+
+// newEclipticSession dials EthProvider and builds a transacting Ecliptic
+// session. The caller must Close the returned client.
+func newEclipticSession(ctx context.Context, privateKey *ecdsa.PrivateKey) (*ecliptic.EclipticSession, *ethclient.Client, error) {
+	if EthProvider == "" {
+		return nil, nil, fmt.Errorf("must set ETH_PROVIDER (ex: https://mainnet.infura.io/v3/<your-key>)")
+	}
+	client, err := ethclient.DialContext(ctx, EthProvider)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
+	}
+	auth, err := newTransactor(ctx, client, privateKey)
+	if err != nil {
+		client.Close()
+		return nil, nil, err
+	}
+	eclip, err := ecliptic.NewEcliptic(common.HexToAddress(EclipticContract), client)
+	if err != nil {
+		client.Close()
+		return nil, nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
+	}
+	session := &ecliptic.EclipticSession{
+		Contract:     eclip,
+		TransactOpts: *auth,
+		CallOpts: bind.CallOpts{
+			From:    auth.From,
+			Context: ctx,
+		},
+	}
+	return session, client, nil
+}
+
+func setL1NetworkKeys(ctx context.Context, patp string, point *types.Point, wallet keygen.Wallet, breach bool) (*ethTypes.Transaction, error) {
 	patp, pointInt, err := types.ValidateAndNormalizePatp(patp)
 	if err != nil {
 		return &ethTypes.Transaction{}, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	if EthProvider == "" {
-		return &ethTypes.Transaction{}, fmt.Errorf("must set ETH_PROVIDER (ex: https://mainnet.infura.io/v3/<your-key>)")
-	}
-	client, err := ethclient.Dial(EthProvider)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	ctx := context.Background()
-	chainID, err := client.NetworkID(ctx)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to get network ID: %v", err)
-	}
 	privateKey, err := crypto.HexToECDSA(wallet.Ownership.Keys.Private)
 	if err != nil {
 		return &ethTypes.Transaction{}, fmt.Errorf("failed to get private key: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(ctx, client, auth, 5); err != nil {
-		return &ethTypes.Transaction{}, err
-	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
 	}
 	publicCrypt, err := addHexPrefix(wallet.Network.Keys.Crypt.Public)
 	if err != nil {
@@ -336,17 +355,15 @@ func setL1NetworkKeys(patp string, point *types.Point, wallet keygen.Wallet, bre
 		breach {
 		fmt.Printf("Breaching with existing key revision for %s.", patp)
 	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-		CallOpts: bind.CallOpts{
-			From: auth.From,
-		},
+	session, client, err := newEclipticSession(ctx, privateKey)
+	if err != nil {
+		return &ethTypes.Transaction{}, err
 	}
+	defer client.Close()
 	return session.ConfigureKeys(pointInt, publicCrypt, publicAuth, CRYPTO_SUITE_VERSION, breach)
 }
 
-func l1Escape(patp string, sponsor string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1Escape(ctx context.Context, patp string, sponsor string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	_, pointInt, err := types.ValidateAndNormalizePatp(patp)
 	if err != nil {
 		return &ethTypes.Transaction{}, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
@@ -355,37 +372,11 @@ func l1Escape(patp string, sponsor string, privateKey *ecdsa.PrivateKey) (*ethTy
 	if err != nil {
 		return &ethTypes.Transaction{}, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	if EthProvider == "" {
-		return &ethTypes.Transaction{}, fmt.Errorf("must set ETH_PROVIDER (ex: https://mainnet.infura.io/v3/<your-key>)")
-	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	ctx := context.Background()
-	chainID, err := client.NetworkID(ctx)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(ctx, client, auth, 5); err != nil {
 		return &ethTypes.Transaction{}, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-		CallOpts: bind.CallOpts{
-			From: auth.From,
-		},
-	}
+	defer client.Close()
 	allowed, err := session.CanEscapeTo(pointInt, sponsorInt)
 	if allowed {
 		return session.Escape(pointInt, sponsorInt)
@@ -394,255 +385,105 @@ func l1Escape(patp string, sponsor string, privateKey *ecdsa.PrivateKey) (*ethTy
 	}
 }
 
-func l1Adopt(adoptee string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1Adopt(ctx context.Context, adoptee string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	_, adopteeInt, err := types.ValidateAndNormalizePatp(adoptee)
 	if err != nil {
 		return &ethTypes.Transaction{}, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	if EthProvider == "" {
-		return &ethTypes.Transaction{}, fmt.Errorf("must set ETH_PROVIDER (ex: https://mainnet.infura.io/v3/<your-key>)")
-	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	ctx := context.Background()
-	chainID, err := client.NetworkID(ctx)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(ctx, client, auth, 5); err != nil {
 		return &ethTypes.Transaction{}, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return &ethTypes.Transaction{}, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-		CallOpts: bind.CallOpts{
-			From: auth.From,
-		},
-	}
+	defer client.Close()
 	return session.Adopt(adopteeInt)
 }
 
-func l1CancelEscape(point string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1CancelEscape(ctx context.Context, point string, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	_, pointInt, err := types.ValidateAndNormalizePatp(point)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	if EthProvider == "" {
-		return nil, fmt.Errorf("must set ETH_PROVIDER (ex: https://mainnet.infura.io/v3/<your-key>)")
-	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	ctx := context.Background()
-	chainID, err := client.NetworkID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(ctx, client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-		CallOpts: bind.CallOpts{
-			From: auth.From,
-		},
-	}
+	defer client.Close()
 	return session.CancelEscape(pointInt)
 }
 
 // Transfer Ownership (L1)
-func l1TransferOwnership(newOwner common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
-	if EthProvider == "" {
-		return nil, fmt.Errorf("must set ETH_PROVIDER")
-	}
-	client, err := ethclient.Dial(EthProvider)
+func l1TransferOwnership(ctx context.Context, newOwner common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(context.Background(), client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-	}
+	defer client.Close()
 	return session.TransferOwnership(newOwner)
 }
 
 // Set Management Proxy (L1)
-func l1SetManagementProxy(pointStr string, manager common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1SetManagementProxy(ctx context.Context, pointStr string, manager common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	_, point, err := types.ValidateAndNormalizePatp(pointStr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(context.Background(), client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-	}
+	defer client.Close()
 	return session.SetManagementProxy(uint32(point), manager)
 }
 
 // Set Transfer Proxy (L1)
-func l1SetTransferProxy(pointStr string, proxy common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1SetTransferProxy(ctx context.Context, pointStr string, proxy common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	_, point, err := types.ValidateAndNormalizePatp(pointStr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
 	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(context.Background(), client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-	}
+	defer client.Close()
 	return session.SetTransferProxy(uint32(point), proxy)
 }
 
 // Set Spawn Proxy (L1)
-func l1SetSpawnProxy(prefixStr string, proxy common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1SetSpawnProxy(ctx context.Context, prefixStr string, proxy common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	prefix, err := strconv.ParseUint(prefixStr, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("invalid prefix: %v", err)
 	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(context.Background(), client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-	}
+	defer client.Close()
 	return session.SetSpawnProxy(uint16(prefix), proxy)
 }
 
 // Set Voting Proxy (L1)
-func l1SetVotingProxy(galaxyStr string, voter common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
+func l1SetVotingProxy(ctx context.Context, galaxyStr string, voter common.Address, privateKey *ecdsa.PrivateKey) (*ethTypes.Transaction, error) {
 	galaxy, err := strconv.ParseUint(galaxyStr, 10, 8)
 	if err != nil {
 		return nil, fmt.Errorf("invalid galaxy: %v", err)
 	}
-	client, err := ethclient.Dial(EthProvider)
+	session, client, err := newEclipticSession(ctx, privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Ethereum: %v", err)
-	}
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network ID: %v", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transactor: %v", err)
-	}
-	if err := getGas(context.Background(), client, auth, 5); err != nil {
 		return nil, err
 	}
-	eclipticAddress := common.HexToAddress(EclipticContract)
-	eclip, err := ecliptic.NewEcliptic(eclipticAddress, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind Ecliptic contract: %v", err)
-	}
-	session := &ecliptic.EclipticSession{
-		Contract:     eclip,
-		TransactOpts: *auth,
-	}
+	defer client.Close()
 	return session.SetVotingProxy(uint8(galaxy), voter)
 }
 
 // Generic L2 Transaction Handler for Proxies
-func ProxyTransaction(point, masterTicket, passphrase, target string,
+func ProxyTransaction(ctx context.Context, point, masterTicket, passphrase, target string,
 	operation func(context.Context, string, string, string, *ecdsa.PrivateKey) (*types.Transaction, error)) (types.Transaction, error) {
-	return l2Transaction(point, masterTicket, passphrase, target, operation)
+	return l2Transaction(ctx, point, masterTicket, passphrase, target, operation)
 }
 
-func Wait(duration time.Duration, keysTx string) error {
+func Wait(ctx context.Context, duration time.Duration, keysTx string) error {
 	if duration == 0 {
 		return nil
 	}
@@ -657,14 +498,26 @@ func Wait(duration time.Duration, keysTx string) error {
 	if waitTime > duration {
 		waitTime = duration
 	}
+	if waitTime <= 0 {
+		waitTime = 10 * time.Second
+	}
 	deadline := time.Now().Add(duration)
 	ticker := time.NewTicker(waitTime)
 	defer ticker.Stop()
 
 	for {
-		pending, err := Pending("")
+		pending, err := Pending(ctx, "")
 		if err != nil {
-			return fmt.Errorf("error getting pending ships: %v", err)
+			fmt.Printf("Error getting pending ships: %v\n", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Second):
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for transaction after %v", duration)
+			}
+			continue
 		}
 		found := false
 		for _, tx := range pending {
@@ -678,6 +531,8 @@ func Wait(duration time.Duration, keysTx string) error {
 			return nil
 		}
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-ticker.C:
 		case <-time.After(time.Until(deadline)):
 			return fmt.Errorf("timeout waiting for transaction after %v", duration)
@@ -721,11 +576,15 @@ func waitForReceipt(ctx context.Context, client *ethclient.Client, tx *ethTypes.
 		if err == nil {
 			return receipt, nil
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
-func validatePointAndGetInfo(point string) (string, *types.Point, error) {
+func validatePointAndGetInfo(ctx context.Context, point string) (string, *types.Point, error) {
 	patp, _, err := types.ValidateAndNormalizePatp(point)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", ErrInvalidPoint, err)
@@ -738,10 +597,10 @@ func validatePointAndGetInfo(point string) (string, *types.Point, error) {
 }
 
 // generic transaction handler
-func l2Transaction(point, masterTicket, passphrase, target string,
+func l2Transaction(ctx context.Context, point, masterTicket, passphrase, target string,
 	operation func(context.Context, string, string, string, *ecdsa.PrivateKey) (*types.Transaction, error)) (types.Transaction, error) {
 	masterTicket = strings.TrimPrefix(masterTicket, "~")
-	privKey, derivedPubkey, _, _, _, err := ValidateKey(point, masterTicket, passphrase, "", false)
+	privKey, derivedPubkey, _, _, _, err := ValidateKey(ctx, point, masterTicket, passphrase, "", false)
 	if err != nil {
 		return types.Transaction{}, fmt.Errorf("%w: %v", ErrKeyMaterial, err)
 	}
@@ -760,7 +619,7 @@ func l2Transaction(point, masterTicket, passphrase, target string,
 // a note about adjustLife: keyfiles are generated using the private keys
 // of the *previous* life value, so we need to generate the previous life's
 // keys and then generate the keyfile noun using the current life value
-func getWalletAndPoint(point, masterTicket, passphrase string, life int, adjustLife bool) (keygen.Wallet, *types.Point, string, error) {
+func getWalletAndPoint(ctx context.Context, point, masterTicket, passphrase string, life int, adjustLife bool) (keygen.Wallet, *types.Point, string, error) {
 	masterTicket = strings.TrimPrefix(masterTicket, "~")
 	if err := ticketValidation(masterTicket); err != nil {
 		return keygen.Wallet{}, nil, "", err
@@ -796,7 +655,7 @@ func getWalletAndPoint(point, masterTicket, passphrase string, life int, adjustL
 }
 
 // validates and returns a keypair from either master ticket or eth key input
-func ValidateKey(point, input, passphrase, seed string, genkey bool) (*ecdsa.PrivateKey, string, *types.Point, types.NetworkKeys, string, error) {
+func ValidateKey(ctx context.Context, point, input, passphrase, seed string, genkey bool) (*ecdsa.PrivateKey, string, *types.Point, types.NetworkKeys, string, error) {
 	var ethKey *ecdsa.PrivateKey
 	var derivedPubkey string
 	var ownerPubkey string
@@ -804,10 +663,11 @@ func ValidateKey(point, input, passphrase, seed string, genkey bool) (*ecdsa.Pri
 	var networkKeys types.NetworkKeys
 	var authType string
 	if strings.Contains(input, "-") {
-		wallet, pointInfo, _, err := getWalletAndPoint(point, input, passphrase, 0, false)
+		wallet, pInfo, _, err := getWalletAndPoint(ctx, point, input, passphrase, 0, false)
 		if err != nil {
-			return ethKey, derivedPubkey, pointInfo, networkKeys, authType, err
+			return ethKey, derivedPubkey, pInfo, networkKeys, authType, err
 		}
+		pointInfo = pInfo
 		if err := ticketValidation(input); err != nil {
 			return ethKey, derivedPubkey, pointInfo, networkKeys, authType, err
 		}
@@ -831,7 +691,7 @@ func ValidateKey(point, input, passphrase, seed string, genkey bool) (*ecdsa.Pri
 			}
 		}
 	} else if len(input) > 63 {
-		pResp, err := Point(point)
+		pResp, err := Point(ctx, point)
 		pointInfo = pResp.Point
 		if err != nil {
 			return ethKey, derivedPubkey, pointInfo, networkKeys, authType, fmt.Errorf("failed to get point: %v", err)
@@ -921,8 +781,8 @@ func reverseBytes(input []byte) []byte {
 
 // +code
 // step is for incrementing the code revision
-func GenerateCode(point, ticket, passphrase string, life, step int) (string, error) {
-	wallet, _, _, err := getWalletAndPoint(point, ticket, passphrase, life, true)
+func GenerateCode(ctx context.Context, point, ticket, passphrase string, life, step int) (string, error) {
+	wallet, _, _, err := getWalletAndPoint(ctx, point, ticket, passphrase, life, true)
 	if err != nil {
 		return "", err
 	}

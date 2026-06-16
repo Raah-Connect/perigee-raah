@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Native-Planet/perigee/libprg"
 	"github.com/Native-Planet/perigee/types"
 
+	ethTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +24,7 @@ var GetPointCmd = &cobra.Command{
 		if point == "" {
 			return fmt.Errorf("point is required")
 		}
-		resp, err := libprg.Point(point)
+		resp, err := libprg.Point(cmd.Context(), point)
 		if err != nil {
 			return fmt.Errorf("error getting point: %v", err)
 		}
@@ -47,7 +49,7 @@ var GetPendingCmd = &cobra.Command{
 		} else if address != "" {
 			addr = address
 		}
-		resp, err := libprg.Pending(addr)
+		resp, err := libprg.Pending(cmd.Context(), addr)
 		if err != nil {
 			return fmt.Errorf("error retrieving pending: %v", err)
 		}
@@ -97,7 +99,11 @@ var ModBreachCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		keysTx, err := libprg.Breach(point, masterTicket, passphrase, seed)
+		pInfo, err := libprg.Point(cmd.Context(), point)
+		if err != nil {
+			return fmt.Errorf("error getting point: %v", err)
+		}
+		keysTx, err := libprg.Breach(cmd.Context(), point, masterTicket, passphrase, seed)
 		if err != nil {
 			return fmt.Errorf("error processing breach: %v", err)
 		}
@@ -112,10 +118,39 @@ var ModBreachCmd = &cobra.Command{
 				return fmt.Errorf("error getting wait flag: %v", err)
 			}
 			switch v := keysTx.(type) {
-			// if it returns an l2 receipt (l1 will wait on its own)
+			// if it returns an l2 receipt
 			case types.Transaction:
-				if err = libprg.Wait(duration, v.Signature); err != nil {
+				if err = libprg.Wait(cmd.Context(), duration, v.Signature); err != nil {
 					return fmt.Errorf("error waiting for keys transaction: %v", err)
+				}
+			// wait for roller to witness l1 txo
+			case *ethTypes.Receipt:
+				prevLife, err := strconv.Atoi(pInfo.Point.Network.Keys.Life)
+				if err != nil {
+					return fmt.Errorf("invalid life: %v", err)
+				}
+				timeout := time.After(duration)
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-cmd.Context().Done():
+						return cmd.Context().Err()
+					case <-timeout:
+						return fmt.Errorf("timeout after %v waiting for life increment to be returned by roller", duration)
+					case <-ticker.C:
+						newInfo, err := libprg.Point(cmd.Context(), point)
+						if err != nil {
+							return fmt.Errorf("error getting point: %v", err)
+						}
+						newLife, err := strconv.Atoi(newInfo.Point.Network.Keys.Life)
+						if err != nil {
+							return fmt.Errorf("invalid life: %v", err)
+						}
+						if newLife > prevLife {
+							return nil
+						}
+					}
 				}
 			}
 		}
@@ -160,9 +195,9 @@ var ModEscapeCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		keysTx, err := libprg.Escape(point, sponsor, masterTicket, passphrase)
+		keysTx, err := libprg.Escape(cmd.Context(), point, sponsor, masterTicket, passphrase)
 		if err != nil {
-			return fmt.Errorf("error processing breach: %v", err)
+			return fmt.Errorf("error processing escape: %v", err)
 		}
 		jsonData, err := json.MarshalIndent(keysTx, "", "  ")
 		if err != nil {
@@ -210,9 +245,9 @@ var ModCancelEscapeCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		keysTx, err := libprg.CancelEscape(point, sponsor, masterTicket, passphrase)
+		keysTx, err := libprg.CancelEscape(cmd.Context(), point, sponsor, masterTicket, passphrase)
 		if err != nil {
-			return fmt.Errorf("error processing breach: %v", err)
+			return fmt.Errorf("error processing cancel-escape: %v", err)
 		}
 		jsonData, err := json.MarshalIndent(keysTx, "", "  ")
 		if err != nil {
@@ -231,7 +266,7 @@ var ModAdoptCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting point flag: %v", err)
 		}
-		adoptee, err := cmd.Flags().GetString("sponsor")
+		adoptee, err := cmd.Flags().GetString("adoptee")
 		if err != nil {
 			return fmt.Errorf("error getting point flag: %v", err)
 		}
@@ -260,9 +295,9 @@ var ModAdoptCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		keysTx, err := libprg.Adopt(point, adoptee, masterTicket, passphrase)
+		keysTx, err := libprg.Adopt(cmd.Context(), point, adoptee, masterTicket, passphrase)
 		if err != nil {
-			return fmt.Errorf("error processing breach: %v", err)
+			return fmt.Errorf("error processing adopt: %v", err)
 		}
 		jsonData, err := json.MarshalIndent(keysTx, "", "  ")
 		if err != nil {
@@ -311,7 +346,7 @@ var GetWalletCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		walletData, err := libprg.Wallet(point, masterTicket, passphrase, life)
+		walletData, err := libprg.Wallet(cmd.Context(), point, masterTicket, passphrase, life)
 		if err != nil {
 			return fmt.Errorf("error generating wallet: %v", err)
 		}
@@ -344,7 +379,7 @@ var GetKeyfileCmd = &cobra.Command{
 			return fmt.Errorf("error getting life flag: %v", err)
 		}
 		if life == 0 {
-			pInfo, err := libprg.Point(point)
+			pInfo, err := libprg.Point(cmd.Context(), point)
 			if err != nil {
 				return fmt.Errorf("error retrieving point: %v", err)
 			}
@@ -372,9 +407,9 @@ var GetKeyfileCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		keyfile, err := libprg.Keyfile(point, masterTicket, passphrase, life)
+		keyfile, err := libprg.Keyfile(cmd.Context(), point, masterTicket, passphrase, life)
 		if err != nil {
-			return fmt.Errorf("error generating wallet: %v", err)
+			return fmt.Errorf("error generating keyfile: %v", err)
 		}
 		fmt.Println(keyfile)
 		return writeToFile([]byte(keyfile), output, point, life, "", ".key")
@@ -385,6 +420,10 @@ var GetCodeCmd = &cobra.Command{
 	Use:   "get-code",
 	Short: "Generate a +code from master ticket",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		output, err := cmd.Flags().GetString("output-dir")
+		if err != nil {
+			return fmt.Errorf("error getting point flag: %v", err)
+		}
 		point, err := cmd.Flags().GetString("point")
 		if err != nil {
 			return fmt.Errorf("error getting point flag: %v", err)
@@ -401,7 +440,7 @@ var GetCodeCmd = &cobra.Command{
 			return fmt.Errorf("error getting life flag: %v", err)
 		}
 		if life == 0 {
-			pInfo, err := libprg.Point(point)
+			pInfo, err := libprg.Point(cmd.Context(), point)
 			if err != nil {
 				return fmt.Errorf("error retrieving point: %v", err)
 			}
@@ -429,12 +468,12 @@ var GetCodeCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("error getting passphrase flag: %v", err)
 		}
-		code, err := libprg.GenerateCode(point, masterTicket, passphrase, life, step)
+		code, err := libprg.GenerateCode(cmd.Context(), point, masterTicket, passphrase, life, step)
 		if err != nil {
 			return fmt.Errorf("error generating +code: %v", err)
 		}
 		fmt.Println(code)
-		return nil
+		return writeToFile([]byte(code), output, point, 0, "", ".code")
 	},
 }
 
@@ -457,7 +496,7 @@ func validatePath(pathStr string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("path must be a directory")
 	}
-	return filepath.Base(absPath), nil
+	return absPath, nil
 }
 
 func writeToFile(data []byte, outputDir, point string, life int, prefix, ext string) error {

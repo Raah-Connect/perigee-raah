@@ -214,13 +214,13 @@ func (h *Handler) handleAuth(w http.ResponseWriter, r *http.Request) {
 	ship := r.FormValue("ship")
 	ticket := r.FormValue("ticket")
 	passphrase := r.FormValue("passphrase")
-	point, err := libprg.Point(ship)
+	point, err := libprg.Point(r.Context(), ship)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		h.tmpl.ExecuteTemplate(w, "login-error", fmt.Sprintf("Error retrieving point info: %v", err))
 		return
 	}
-	_, _, _, _, authType, err := libprg.ValidateKey(ship, ticket, passphrase, "", false)
+	_, _, _, _, authType, err := libprg.ValidateKey(r.Context(), ship, ticket, passphrase, "", false)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		h.tmpl.ExecuteTemplate(w, "login-error", err)
@@ -267,7 +267,7 @@ func (h *Handler) handleDownloadWallet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid life value", http.StatusUnauthorized)
 		return
 	}
-	wallet, err := libprg.Wallet(session.Ship, session.Ticket, "", life)
+	wallet, err := libprg.Wallet(r.Context(), session.Ship, session.Ticket, "", life)
 	if err != nil {
 		fmt.Printf("Wallet generation error: %v\n", err)
 		http.Error(w, "Failed to generate wallet", http.StatusInternalServerError)
@@ -302,7 +302,7 @@ func (h *Handler) handleDownloadKeyfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	keyfile, err := libprg.Keyfile(session.Ship, session.Ticket, "", 0)
+	keyfile, err := libprg.Keyfile(r.Context(), session.Ship, session.Ticket, "", 0)
 	if err != nil {
 		http.Error(w, "Failed to generate keyfile", http.StatusInternalServerError)
 		return
@@ -366,7 +366,7 @@ func (h *Handler) handleBreach(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	receipt, err := libprg.Breach(session.Ship, session.Ticket, session.Passphrase, seed)
+	receipt, err := libprg.Breach(r.Context(), session.Ship, session.Ticket, session.Passphrase, seed)
 	if err != nil {
 		http.Error(w, "Failed to breach network keys", http.StatusInternalServerError)
 		return
@@ -414,15 +414,15 @@ func (h *Handler) handleTransferSubmit(w http.ResponseWriter, r *http.Request) {
 	var receipt interface{}
 	switch transferType {
 	case "owner":
-		receipt, err = libprg.TransferOwnership(session.Ship, session.Ticket, session.Passphrase, address, true)
+		receipt, err = libprg.TransferOwnership(r.Context(), session.Ship, session.Ticket, session.Passphrase, address, true)
 	case "management":
-		receipt, err = libprg.SetManagementProxy(session.Ship, session.Ticket, session.Passphrase, address)
+		receipt, err = libprg.SetManagementProxy(r.Context(), session.Ship, session.Ticket, session.Passphrase, address)
 	case "transfer-proxy":
-		receipt, err = libprg.SetTransferProxy(session.Ship, session.Ticket, session.Passphrase, address)
+		receipt, err = libprg.SetTransferProxy(r.Context(), session.Ship, session.Ticket, session.Passphrase, address)
 	case "spawn-proxy":
-		receipt, err = libprg.SetSpawnProxy(session.Ship, session.Ticket, session.Passphrase, address)
+		receipt, err = libprg.SetSpawnProxy(r.Context(), session.Ship, session.Ticket, session.Passphrase, address)
 	case "voting-proxy":
-		receipt, err = libprg.SetVotingProxy(session.Ship, session.Ticket, session.Passphrase, address)
+		receipt, err = libprg.SetVotingProxy(r.Context(), session.Ship, session.Ticket, session.Passphrase, address)
 	default:
 		http.Error(w, "Invalid transfer type", http.StatusBadRequest)
 		return
@@ -475,7 +475,7 @@ func (h *Handler) handleEscape(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session", http.StatusUnauthorized)
 		return
 	}
-	receipt, err := libprg.Escape(session.Ship, session.Ticket, session.Passphrase, sponsor)
+	receipt, err := libprg.Escape(r.Context(), session.Ship, sponsor, session.Ticket, session.Passphrase)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to initiate escape: %v", err), http.StatusInternalServerError)
 		return
@@ -504,7 +504,7 @@ func (h *Handler) handleCancelEscape(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session", http.StatusUnauthorized)
 		return
 	}
-	receipt, err := libprg.CancelEscape(session.Ship, session.Ticket, session.Passphrase, "")
+	receipt, err := libprg.CancelEscape(r.Context(), session.Ship, "", session.Ticket, session.Passphrase)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to cancel escape: %v", err), http.StatusInternalServerError)
 		return
@@ -542,7 +542,7 @@ func (h *Handler) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session", http.StatusUnauthorized)
 		return
 	}
-	receipt, err := libprg.Adopt(session.Ship, session.Ticket, session.Passphrase, adoptee)
+	receipt, err := libprg.Adopt(r.Context(), session.Ship, adoptee, session.Ticket, session.Passphrase)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to adopt point: %v", err), http.StatusInternalServerError)
 		return

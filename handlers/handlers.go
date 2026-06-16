@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -66,7 +67,7 @@ func GetPoint() http.HandlerFunc {
 			return
 		}
 		point := r.URL.Query().Get("point")
-		resp, err := libprg.Point(point)
+		resp, err := libprg.Point(r.Context(), point)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting point: %v", err), http.StatusInternalServerError)
 			return
@@ -97,7 +98,7 @@ func GetWallet() http.HandlerFunc {
 		}
 		zap.L().Info("Generate wallet", zap.String("point", point), zap.Int("life", life))
 
-		wallet, err := libprg.Wallet(point, ticket, passphrase, life)
+		wallet, err := libprg.Wallet(r.Context(), point, ticket, passphrase, life)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error generating wallet: %v", err), http.StatusInternalServerError)
 			return
@@ -116,7 +117,7 @@ func GetPending() http.HandlerFunc {
 		if address == "" {
 			address = r.URL.Query().Get("point")
 		}
-		resp, err := libprg.Pending(address)
+		resp, err := libprg.Pending(r.Context(), address)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting pending: %v", err), http.StatusInternalServerError)
 			return
@@ -140,7 +141,12 @@ func GetKeyfile() http.HandlerFunc {
 			return
 		}
 
-		keyfile, err := libprg.Keyfile(point, ticket, "", life)
+		if point == "" || ticket == "" {
+			http.Error(w, "Missing point or ticket parameter", http.StatusBadRequest)
+			return
+		}
+
+		keyfile, err := libprg.Keyfile(r.Context(), point, ticket, "", life)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error generating keyfile: %v", err), http.StatusInternalServerError)
 			return
@@ -171,12 +177,12 @@ func GetCode() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		step, err := parseInt(r.URL.Query().Get("life"))
+		step, err := parseInt(r.URL.Query().Get("step"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		code, err := libprg.GenerateCode(point, ticket, passphrase, life, step)
+		code, err := libprg.GenerateCode(r.Context(), point, ticket, passphrase, life, step)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -185,7 +191,7 @@ func GetCode() http.HandlerFunc {
 	}
 }
 
-func handleTransaction(w http.ResponseWriter, r *http.Request, f func(string, string, string, string) (interface{}, error)) {
+func handleTransaction(w http.ResponseWriter, r *http.Request, f func(context.Context, string, string, string, string) (interface{}, error)) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -209,7 +215,7 @@ func handleTransaction(w http.ResponseWriter, r *http.Request, f func(string, st
 	}
 
 	passphrase := r.URL.Query().Get("passphrase")
-	tx, err := f(point, targetPatp, ticket, passphrase)
+	tx, err := f(r.Context(), point, targetPatp, ticket, passphrase)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error processing transaction: %v", err), http.StatusInternalServerError)
 		return
@@ -248,7 +254,7 @@ func ModBreach() http.HandlerFunc {
 		passphrase := r.URL.Query().Get("passphrase")
 		seed := r.URL.Query().Get("seed")
 
-		tx, err := libprg.Breach(point, ticket, passphrase, seed)
+		tx, err := libprg.Breach(r.Context(), point, ticket, passphrase, seed)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error processing breach: %v", err), http.StatusInternalServerError)
 			return

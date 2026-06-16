@@ -251,87 +251,6 @@ type Client struct {
 	ReqCounter atomic.Int64
 }
 
-func (c *Client) Request(method string, params interface{}) (json.RawMessage, error) {
-	req := JsonRPCRequest{
-		Version: "2.0",
-		Method:  method,
-		Params:  params,
-		ID:      c.NextID(),
-	}
-
-	reqBody, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-	zap.L().Debug("Request", zap.String("body", string(reqBody)))
-
-	httpReq, err := http.NewRequest("POST", c.Endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HttpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
-	zap.L().Debug("Response", zap.String("status", resp.Status), zap.String("body", string(bodyBytes)))
-
-	var rpcResp JsonRPCResponse
-	if err := json.Unmarshal(bodyBytes, &rpcResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("rpc error: %s", rpcResp.Error.Message)
-	}
-
-	return rpcResp.Result, nil
-}
-
-// map of methods that require params to be converted to array format
-var arrayParamMethods = map[string]bool{
-	"getUnsignedTx": true,
-	// add others as needed
-}
-
-func (c *Client) paramsToArray(method string, params interface{}) (interface{}, error) {
-	if !arrayParamMethods[method] {
-		return params, nil
-	}
-	switch method {
-	case "getUnsignedTx":
-		var p struct {
-			Tx    string      `json:"tx"`
-			Nonce string      `json:"nonce"`
-			From  FromData    `json:"from"`
-			Data  interface{} `json:"data"`
-		}
-		b, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("marshal params: %w", err)
-		}
-		if err := json.Unmarshal(b, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal params: %w", err)
-		}
-		return []interface{}{
-			p.Tx,
-			p.Nonce,
-			p.From,
-			p.Data,
-		}, nil
-	}
-
-	return params, nil
-}
-
 func (c *Client) IsOwner(ctx context.Context, point, address string) (bool, error) {
 	pointInfo, err := c.GetPoint(ctx, point)
 	if err != nil {
@@ -345,14 +264,10 @@ func (c *Client) NextID() string {
 }
 
 func (c *Client) DoRequest(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	finalParams, err := c.paramsToArray(method, params)
-	if err != nil {
-		return nil, fmt.Errorf("convert params: %w", err)
-	}
 	req := JsonRPCRequest{
 		Version: "2.0",
 		Method:  method,
-		Params:  finalParams,
+		Params:  params,
 		ID:      c.NextID(),
 	}
 	reqBody, err := json.Marshal(req)
@@ -429,7 +344,7 @@ func (c *Client) ConfigureKeys(ctx context.Context, point, encryptPublic, authPu
 	if err := c.addSignature(ctx, "configureKeys", &params, privateKey); err != nil {
 		return nil, fmt.Errorf("add signature: %w", err)
 	}
-	result, err := c.Request("configureKeys", params)
+	result, err := c.DoRequest(ctx, "configureKeys", params)
 	if err != nil {
 		return nil, fmt.Errorf("do request: %w", err)
 	}
@@ -586,7 +501,7 @@ func (c *Client) GetNonce(ctx context.Context, params interface{}) (int, error) 
 		From: fromData.From,
 	}
 
-	result, err := c.Request("getNonce", nonceParams)
+	result, err := c.DoRequest(ctx, "getNonce", nonceParams)
 	if err != nil {
 		return 0, fmt.Errorf("get nonce: %w", err)
 	}
@@ -626,7 +541,7 @@ func (c *Client) GetUnsignedTx(ctx context.Context, method string, params interf
 		From:  reqParams.From,
 		Data:  reqParams.Data,
 	}
-	result, err := c.Request("getUnsignedTx", hashParams)
+	result, err := c.DoRequest(ctx, "getUnsignedTx", hashParams)
 	if err != nil {
 		return "", fmt.Errorf("get unsigned tx: %w", err)
 	}

@@ -1,6 +1,6 @@
 ## `perigee`
 
-An HTTP server and CLI tool for performing Azimuth PKI operations for Urbit IDs
+An HTTP server and CLI tool for performing Azimuth PKI operations for Urbit IDs that incorporates star operations
 
 ![image](https://github.com/user-attachments/assets/4c252a1c-72d5-497d-aca3-8dd3dd958a47)
 
@@ -10,7 +10,7 @@ Additionally, it contains a library (`github.com/Native-Planet/perigee/libprg`) 
 
 Big thanks to [stephenlacy](https://github.com/stephenlacy/go-urbit), [nathanlever](https://github.com/nathanlever/keygen) and everyone who worked on [Bridge](https://github.com/urbit/bridge) and [urbit-key-generation](https://github.com/urbit/urbit-key-generation) for doing the hard parts.
 
-~~For now this library can only perform L2 transactions.~~ *Now with L1!* ✅
+~ *Now with L1!* ✅
 
 Set the `ROLLER_URL` env var for custom roller. Set the `ADMIN_TOKEN` env var if you want authentication in server mode.
 

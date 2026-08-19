@@ -18,7 +18,7 @@ func main() {
 
 	server := dispenser.NewServer(dispenser.ServerConfig{
 		AdminToken: adminToken,
-		Service:    dispenser.NewNoopPlanetService(),
+		Service:    dispenser.NewPlanetServiceFromEnv(),
 	})
 
 	httpServer := &http.Server{

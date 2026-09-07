@@ -515,6 +515,10 @@ func (h *Handler) handleCancelEscape(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("attachment; filename=%s-escape-cancel-receipt.nfo",
 			strings.TrimPrefix(session.Ship, "~")))
 	w.Write([]byte(nfoContent))
+
+}
+func FormatToNFO(data interface{}, title string) string {
+	return formatToNFO(data, title)
 }
 
 func (h *Handler) handleAdopt(w http.ResponseWriter, r *http.Request) {

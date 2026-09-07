@@ -1,18 +1,24 @@
 package dispenser
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Native-Planet/perigee/abi/ecliptic"
 	"github.com/Native-Planet/perigee/libprg"
+	"github.com/Native-Planet/perigee/pontifex"
 	"github.com/Native-Planet/perigee/roller"
 	perigeeTypes "github.com/Native-Planet/perigee/types"
 
@@ -22,16 +28,42 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-type PlanetService interface {
-	SpawnPlanet(ctx context.Context, req SpawnPlanetRequest) (SpawnPlanetResponse, error)
-	TransferAndReset(ctx context.Context, planet string, req TransferResetRequest) (TransferResetResponse, error)
-	GeneratePassportZip(ctx context.Context, planet string, req GeneratePassportRequest) (GeneratePassportResponse, error)
-}
+const passportStorageDir = "/var/lib/perigee/passports"
+
+const passportTTL = 24 * time.Hour
 
 type NoopPlanetService struct{}
 
 type LivePlanetService struct {
 	rpc *perigeeTypes.Client
+}
+
+type PlanetService interface {
+	SpawnPlanet(ctx context.Context, req SpawnPlanetRequest) (SpawnPlanetResponse, error)
+	TransferAndReset(ctx context.Context, planet string, req TransferResetRequest) (TransferResetResponse, error)
+	GeneratePassportZip(ctx context.Context, planet string, req GeneratePassportRequest) (GeneratePassportResponse, error)
+	ResolvePassportPath(ctx context.Context, planet, token string) (string, error)
+}
+
+func (s *LivePlanetService) ResolvePassportPath(_ context.Context, planet, token string) (string, error) {
+	if planet == "" || token == "" {
+		return "", fmt.Errorf("planet and token are required")
+	}
+	if strings.ContainsAny(token, "/\\.") {
+		return "", fmt.Errorf("invalid token")
+	}
+	trimmed := strings.TrimPrefix(planet, "~")
+	path := filepath.Join(passportStorageDir, fmt.Sprintf("%s-%s.zip", trimmed, token))
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("passport not found")
+	}
+	if time.Since(info.ModTime()) > passportTTL {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("passport expired")
+	}
+	return path, nil
 }
 
 func NewNoopPlanetService() *NoopPlanetService {
@@ -120,6 +152,13 @@ func (s *LivePlanetService) SpawnPlanet(ctx context.Context, req SpawnPlanetRequ
 	}, nil
 }
 
+func (s *NoopPlanetService) ResolvePassportPath(_ context.Context, planet, token string) (string, error) {
+	if planet == "" || token == "" {
+		return "", fmt.Errorf("planet and token are required")
+	}
+	return "/var/lib/perigee/passports/placeholder.zip", nil
+}
+
 func (s *LivePlanetService) TransferAndReset(_ context.Context, planet string, req TransferResetRequest) (TransferResetResponse, error) {
 	if planet == "" {
 		return TransferResetResponse{}, fmt.Errorf("planet is required")
@@ -130,14 +169,89 @@ func (s *LivePlanetService) TransferAndReset(_ context.Context, planet string, r
 	return TransferResetResponse{}, fmt.Errorf("not implemented")
 }
 
-func (s *LivePlanetService) GeneratePassportZip(_ context.Context, planet string, req GeneratePassportRequest) (GeneratePassportResponse, error) {
+func (s *LivePlanetService) GeneratePassportZip(ctx context.Context, planet string, req GeneratePassportRequest) (GeneratePassportResponse, error) {
 	if planet == "" {
 		return GeneratePassportResponse{}, fmt.Errorf("planet is required")
 	}
 	if req.MasterTicket == "" {
 		return GeneratePassportResponse{}, fmt.Errorf("masterTicket is required")
 	}
-	return GeneratePassportResponse{}, fmt.Errorf("not implemented")
+
+	point, err := libprg.Point(ctx, planet)
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("fetch point info: %w", err)
+	}
+	life, err := strconv.Atoi(point.Point.Network.Keys.Life)
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("invalid life value: %w", err)
+	}
+
+	wallet, err := libprg.Wallet(ctx, planet, req.MasterTicket, req.Passphrase, life)
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("generate wallet: %w", err)
+	}
+	keyfile, err := libprg.Keyfile(ctx, planet, req.MasterTicket, req.Passphrase, life)
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("generate keyfile: %w", err)
+	}
+	sigilSVG, err := pontifex.GenerateSigil(perigeeTypes.PxSvgConfig{Point: planet, Size: 256})
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("generate sigil: %w", err)
+	}
+
+	walletJSON, err := json.Marshal(wallet)
+	if err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("marshal wallet: %w", err)
+	}
+	var walletMap map[string]interface{}
+	if err := json.Unmarshal(walletJSON, &walletMap); err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("decode wallet: %w", err)
+	}
+
+	trimmed := strings.TrimPrefix(planet, "~")
+	walletNFO := pontifex.FormatToNFO(walletMap, fmt.Sprintf("%s PASSPORT", strings.ToUpper(planet)))
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	files := map[string]string{
+		trimmed + "-wallet.nfo":                 walletNFO,
+		fmt.Sprintf("%s-%d.key", trimmed, life): keyfile,
+		trimmed + "-sigil.svg":                  sigilSVG,
+	}
+	for name, content := range files {
+		fw, err := zw.Create(name)
+		if err != nil {
+			return GeneratePassportResponse{}, fmt.Errorf("zip create %s: %w", name, err)
+		}
+		if _, err := fw.Write([]byte(content)); err != nil {
+			return GeneratePassportResponse{}, fmt.Errorf("zip write %s: %w", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("close zip: %w", err)
+	}
+
+	if err := os.MkdirAll(passportStorageDir, 0700); err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("create storage dir: %w", err)
+	}
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("generate token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	storagePath := filepath.Join(passportStorageDir, fmt.Sprintf("%s-%s.zip", trimmed, token))
+	if err := os.WriteFile(storagePath, buf.Bytes(), 0600); err != nil {
+		return GeneratePassportResponse{}, fmt.Errorf("write zip: %w", err)
+	}
+
+	return GeneratePassportResponse{
+		Planet:        planet,
+		SizeBytes:     int64(buf.Len()),
+		StoragePath:   storagePath,
+		DownloadToken: token,
+		ExpiresAt:     time.Now().UTC().Add(24 * time.Hour),
+	}, nil
 }
 
 func (s *LivePlanetService) pickUnspawnedPoint(ctx context.Context, starPatp string) (uint64, string, error) {

@@ -3,7 +3,10 @@ package dispenser
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -36,7 +39,7 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/healthz", s.healthz)
 	s.router.HandleFunc("/readyz", s.readyz)
 	s.router.HandleFunc("/v1/planets/spawn", s.withAuth(s.spawnPlanet))
-	s.router.HandleFunc("/v1/planets/", s.withAuth(s.planetsSubresource))
+	s.router.HandleFunc("/v1/planets/", s.route)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -63,6 +66,28 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		next(w, r)
+	}
+}
+
+// route dispatches everything under /v1/planets/ by path segment count:
+//
+//	{planet}/{action}                       -> planetsSubresource (admin-authed)
+//	{planet}/passport/{token}/download      -> downloadPassport (token-authed, no admin token)
+func (s *Server) route(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/v1/planets/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+
+	switch len(parts) {
+	case 2:
+		s.withAuth(s.planetsSubresource)(w, r)
+	case 4:
+		if parts[1] == "passport" && parts[3] == "download" {
+			s.downloadPassport(w, r, parts[0], parts[2])
+			return
+		}
+		http.NotFound(w, r)
+	default:
+		http.NotFound(w, r)
 	}
 }
 
@@ -153,6 +178,38 @@ func (s *Server) generatePassport(w http.ResponseWriter, r *http.Request, planet
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) downloadPassport(w http.ResponseWriter, r *http.Request, planet, token string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.service == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	path, err := s.service.ResolvePassportPath(r.Context(), planet, token)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.Error(w, "passport not found or expired", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "passport not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-passport.zip", strings.TrimPrefix(planet, "~")))
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
 }
 
 func decodeJSON(r *http.Request, out any) error {

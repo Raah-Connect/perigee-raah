@@ -1,3 +1,4 @@
 perigee
 out/
 *.exe
+.DS_Store

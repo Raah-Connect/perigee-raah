@@ -2,3 +2,6 @@ perigee
 out/
 *.exe
 .DS_Store
+.env
+.env.*
+*.env
